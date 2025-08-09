@@ -284,27 +284,28 @@ def render_enrichment_section() -> Tuple[List[str], List[Dict[str, Any]]]:
         return [], []
     
     st.divider()
-    st.subheader("Extract phone numbers from CSV")
+    st.subheader("Extract & Enrich Lead Data")
     csv_module = _load_csv_client_module()
     
     if csv_module is None:
         st.error("CSV client not available")
         return [], []
 
-    # Check if we have existing phone data
+    # Check if we have existing enriched data
     existing_phone_numbers = st.session_state.get("phone_numbers", [])
     existing_lead_data = st.session_state.get("complete_lead_data", [])
     
     if existing_phone_numbers and existing_lead_data:
-        st.info(f"Using {len(existing_phone_numbers)} previously extracted phone numbers")
+        st.info(f"Using {len(existing_phone_numbers)} previously processed leads with enriched data")
         return existing_phone_numbers, existing_lead_data
 
-    if st.button("Extract phone numbers from CSV"):
+    if st.button("Extract & Enrich Lead Data", type="primary"):
         if dataframe is None or dataframe.empty:
             st.error("No data to process")
             return [], []
         
-        with st.spinner("Extracting phone numbers from CSV data..."):
+        # Step 1: Extract basic lead data from CSV
+        with st.spinner("Step 1/2: Extracting lead data from CSV..."):
             # Convert dataframe to dynamic objects first
             dynamic_objects = dataframe_to_dynamic_objects_safe(dataframe)
             
@@ -319,45 +320,107 @@ def render_enrichment_section() -> Tuple[List[str], List[Dict[str, Any]]]:
                 st.warning("No phone numbers found in the CSV data")
                 return [], []
             
-            # Create lead data objects for calling
-            complete_lead_data = []
-            for obj in dynamic_objects:
-                if not isinstance(obj, dict):
-                    continue
+            st.success(f"✅ Extracted {len(phone_numbers)} leads with phone numbers")
+        
+        # Step 2: Enrich leads with SixtyFour API
+        with st.spinner("Step 2/2: Enriching leads with SixtyFour AI..."):
+            try:
+                successful_enrichments, failed_enrichments = enrich_leads_and_transform(dataframe)
+                
+                if not successful_enrichments and not failed_enrichments:
+                    st.warning("No enrichment results received")
+                    return [], []
+                
+                # Process successful enrichments into complete lead data
+                complete_lead_data = []
+                processed_phones = []
+                
+                for enriched_lead in successful_enrichments:
+                    # Extract phone number from enriched data
+                    structured_data = enriched_lead.get("structured_data", {})
+                    original_lead = enriched_lead.get("lead", {})
                     
-                lead = obj.get("lead", {})
-                if not isinstance(lead, dict):
-                    continue
+                    # Try to get phone from structured data first, then original lead
+                    phone = (structured_data.get("phone") or 
+                            original_lead.get("phone") or original_lead.get("Phone") or
+                            original_lead.get("phone_number") or original_lead.get("Phone Number"))
+                    
+                    if phone and str(phone).strip():
+                        normalized_phone = csv_module.normalize_phone_number(str(phone).strip())
+                        if normalized_phone:
+                            lead_data_item = {
+                                "phone_number": normalized_phone,
+                                "original_lead": original_lead,
+                                "structured_data": structured_data,
+                                "enriched_data": structured_data,  # For backward compatibility
+                                "notes": enriched_lead.get("notes", ""),
+                                "findings": enriched_lead.get("findings", []),
+                                "references": enriched_lead.get("references", {}),
+                                "confidence_score": enriched_lead.get("confidence_score")
+                            }
+                            complete_lead_data.append(lead_data_item)
+                            processed_phones.append(normalized_phone)
                 
-                # Check if this lead has a phone number
-                phone = (lead.get("phone") or lead.get("Phone") or 
-                        lead.get("phone_number") or lead.get("Phone Number"))
+                # Add any leads that weren't enriched but have phone numbers
+                for obj in dynamic_objects:
+                    if not isinstance(obj, dict):
+                        continue
+                    
+                    lead = obj.get("lead", {})
+                    if not isinstance(lead, dict):
+                        continue
+                    
+                    phone = (lead.get("phone") or lead.get("Phone") or 
+                            lead.get("phone_number") or lead.get("Phone Number"))
+                    
+                    if phone and str(phone).strip():
+                        normalized_phone = csv_module.normalize_phone_number(str(phone).strip())
+                        if normalized_phone and normalized_phone not in processed_phones:
+                            lead_data_item = {
+                                "phone_number": normalized_phone,
+                                "original_lead": lead,
+                                "structured_data": {},
+                                "enriched_data": {},
+                                "notes": "Not enriched by SixtyFour API",
+                                "findings": [],
+                                "references": {},
+                                "confidence_score": None
+                            }
+                            complete_lead_data.append(lead_data_item)
+                            processed_phones.append(normalized_phone)
                 
-                if phone and str(phone).strip():
-                    phone_str = str(phone).strip()
-                    if phone_str in phone_numbers:  # Only include if phone was extracted
-                        lead_data_item = {
-                            "phone_number": phone_str,
-                            "original_lead": lead,
-                            "enriched_data": {},  # No enrichment data
-                            "notes": "",
-                            "findings": [],
-                            "references": {},
-                            "confidence_score": None
-                        }
-                        complete_lead_data.append(lead_data_item)
-            
-            # Save to session state
-            st.session_state["phone_numbers"] = phone_numbers
-            st.session_state["complete_lead_data"] = complete_lead_data
-            
-            # Show preview
-            st.success(f"Found {len(phone_numbers)} leads with phone numbers")
-            st.write(f"**Phone numbers extracted:**")
-            sample_to_show = complete_lead_data[:min(len(complete_lead_data), PREVIEW_ROWS)]
-            st.json(sample_to_show)
-            
-            return phone_numbers, complete_lead_data
+                # Save to session state
+                st.session_state["phone_numbers"] = processed_phones
+                st.session_state["complete_lead_data"] = complete_lead_data
+                
+                # Show results
+                st.success(f"✅ Successfully processed {len(complete_lead_data)} leads")
+                if successful_enrichments:
+                    st.info(f"🚀 {len(successful_enrichments)} leads enriched with SixtyFour AI")
+                if failed_enrichments:
+                    st.warning(f"⚠️ {len(failed_enrichments)} leads could not be enriched")
+                
+                # Show preview of enriched data
+                st.write("**Sample enriched leads:**")
+                sample_to_show = complete_lead_data[:min(len(complete_lead_data), 3)]
+                for i, lead in enumerate(sample_to_show, 1):
+                    with st.expander(f"Lead {i}: {lead.get('phone_number', 'No phone')}"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write("**Original Data:**")
+                            st.json(lead.get("original_lead", {}))
+                        with col2:
+                            st.write("**Enriched Data:**")
+                            if lead.get("structured_data"):
+                                st.json(lead.get("structured_data", {}))
+                            else:
+                                st.write("No enrichment available")
+                
+                return processed_phones, complete_lead_data
+                
+            except Exception as e:
+                st.error(f"Error during enrichment: {str(e)}")
+                return [], []
     
     return [], []
 
