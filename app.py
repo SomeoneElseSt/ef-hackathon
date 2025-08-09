@@ -291,6 +291,15 @@ def render_enrichment_section() -> None:
         else:
             st.info("No successful enrichments")
 
+### VAPI Pseudo code
+# Inputs: 
+# succesful leads gotten from extract succesful phones function
+# prompt, provided by the user on the streamlit dashboard 
+# 
+# Processing:
+# Call VAPI API with the prompt and the to phone number
+# Save the call outcome transcript to a list/object of all sucessful calls
+# Show on streamlit
 
 def main() -> None:
     render_header()
