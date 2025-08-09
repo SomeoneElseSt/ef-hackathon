@@ -298,6 +298,8 @@ def render_enrichment_section() -> None:
 # 
 # Processing:
 # Call VAPI API with the prompt and the to phone number
+# 
+# Output: 
 # Save the call outcome transcript to a list/object of all sucessful calls
 # Show on streamlit
 
