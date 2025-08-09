@@ -74,9 +74,9 @@ def load_dataframe_from_upload(uploaded_file) -> Tuple[bool, Optional[pd.DataFra
 
 
 def render_header() -> None:
-    st.set_page_config(page_title="Rip em' if you got 'em!", page_icon="📁", layout="centered")
-    st.title("Rip em' if you got 'em 📞 !")
-    st.caption("Upload your sales list .csv data. We'll find your list's phone numbers and call them with a script you provide.")
+    st.set_page_config(page_title="Hire Line", page_icon="📁", layout="centered")
+    st.title("Hire Line")
+    st.caption("Upload your hiring prospects list .csv data with a phone number and we'll call them to screen them with ascript you provide.")
 
 
 def render_upload_section() -> None:
@@ -100,18 +100,92 @@ def render_upload_section() -> None:
     st.session_state["dataframe"] = dataframe
 
 
+def _load_chatgpt_client_module():
+    """Load ChatGPT client module dynamically"""
+    module_key = "_chatgpt_client_module"
+    if module_key in st.session_state:
+        return st.session_state[module_key]
+    
+    base_dir = os.path.dirname(__file__)
+    target_path = os.path.join(base_dir, "chatgpt-client.py")
+    if not os.path.exists(target_path):
+        return None
+    
+    spec = importlib.util.spec_from_file_location("chatgpt_client", target_path)
+    if spec is None or spec.loader is None:
+        return None
+    
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    
+    st.session_state[module_key] = module
+    return module
+
+
 def render_prompt_input() -> str:
     st.divider()
     st.subheader("Call Prompt")
+    
+    # Generate prompt button
+    dataframe: Optional[pd.DataFrame] = st.session_state.get("dataframe")
+    if dataframe is not None and not dataframe.empty:
+        chatgpt_module = _load_chatgpt_client_module()
+        
+        if chatgpt_module and chatgpt_module.has_openai_key_configured():
+            col1, col2 = st.columns([3, 1])
+            with col2:
+                if st.button("🤖 Generate Prompt", type="secondary", help="Use ChatGPT to generate a recruitment prompt based on your CSV data"):
+                    with st.spinner("Generating prompt with ChatGPT..."):
+                        try:
+                            result = chatgpt_module.generate_prompt_with_env(dataframe)
+                            
+                            if result.success and result.generated_prompt:
+                                st.session_state["vapi_prompt"] = result.generated_prompt
+                                st.session_state["prompt_generated"] = True
+                                st.session_state["prompt_tokens_used"] = result.tokens_used
+                                st.success(f"✅ Prompt generated! ({result.tokens_used} tokens used)")
+                            else:
+                                st.error(f"Failed to generate prompt: {result.error}")
+                        except Exception as e:
+                            st.error(f"Error generating prompt: {str(e)}")
+        else:
+            if not chatgpt_module:
+                st.info("💡 ChatGPT client not available for prompt generation")
+            else:
+                st.info("💡 Set OPENAI_API_KEY in environment to enable AI prompt generation")
+    
+    # Show generation status if prompt was just generated
+    if st.session_state.get("prompt_generated", False):
+        tokens_used = st.session_state.get("prompt_tokens_used", 0)
+        st.info(f"✨ AI-generated recruitment prompt ready! ({tokens_used} tokens used)")
+        st.session_state["prompt_generated"] = False  # Reset the flag
+    
+    # Prompt input
     default_value = st.session_state.get("vapi_prompt", "")
     vapi_prompt = st.text_area(
         label="Enter the prompt for the agents to call your list with!",
         value=default_value,
-        placeholder="Your script goes here...",
+        placeholder="Your recruitment script goes here... (or use 'Generate Prompt' button above)",
         help="Saved locally in session. Used later for calling.",
         height=160,
     )
     st.session_state["vapi_prompt"] = vapi_prompt
+    
+    # First message input
+    st.write("**First Message (Optional)**")
+    default_first_message = st.session_state.get("vapi_first_message", "")
+    vapi_first_message = st.text_input(
+        label="What should the agent say first when the call connects?",
+        value=default_first_message,
+        placeholder="e.g., 'Hi, is this [Name]? I'm calling from [Company]...'",
+        help="This will be the opening line when the call connects. Leave empty to use default.",
+        label_visibility="collapsed"
+    )
+    st.session_state["vapi_first_message"] = vapi_first_message
+    
     return vapi_prompt
 
 def render_file_info_and_preview() -> None:
@@ -297,6 +371,21 @@ def render_enrichment_section() -> Tuple[List[str], List[Dict[str, Any]]]:
     
     if existing_phone_numbers and existing_lead_data:
         st.info(f"Using {len(existing_phone_numbers)} previously processed leads with enriched data")
+        # Always keep the preview visible even when subsequent actions (like VAPI calls) run
+        st.write("**Sample enriched leads:**")
+        sample_to_show = existing_lead_data[:min(len(existing_lead_data), 3)]
+        for i, lead in enumerate(sample_to_show, 1):
+            with st.expander(f"Lead {i}: {lead.get('phone_number', 'No phone')}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**Original Data:**")
+                    st.json(lead.get("original_lead", {}))
+                with col2:
+                    st.write("**Enriched Data:**")
+                    if lead.get("structured_data"):
+                        st.json(lead.get("structured_data", {}))
+                    else:
+                        st.write("No enrichment available")
         return existing_phone_numbers, existing_lead_data
 
     if st.button("Extract & Enrich Lead Data", type="primary"):
@@ -336,13 +425,24 @@ def render_enrichment_section() -> Tuple[List[str], List[Dict[str, Any]]]:
                 processed_phones = []
                 
                 for enriched_lead in successful_enrichments:
-                    # Extract phone number from enriched data
+                    # Debug: Print the enriched lead structure
+                    print(f"DEBUG: Processing enriched lead: {enriched_lead}")
+                    
+                    # Get enriched data but use phone number ONLY from original CSV
                     structured_data = enriched_lead.get("structured_data", {})
+                    # Correct key: enrichment result stores the original CSV row under 'lead'
                     original_lead = enriched_lead.get("lead", {})
                     
-                    # Try to get phone from structured data first, then original lead
-                    phone = (structured_data.get("phone") or 
-                            original_lead.get("phone") or original_lead.get("Phone") or
+                    print(f"DEBUG: Structured data: {structured_data}")
+                    print(f"DEBUG: Original lead before processing: {original_lead}")
+                    
+                    # Handle nested lead structure from SixtyFour API
+                    if "lead" in original_lead and isinstance(original_lead["lead"], dict):
+                        original_lead = original_lead["lead"]
+                        print(f"DEBUG: Original lead after unwrapping: {original_lead}")
+                    
+                    # Only use phone from original CSV data (ignore SixtyFour phone data)
+                    phone = (original_lead.get("phone") or original_lead.get("Phone") or
                             original_lead.get("phone_number") or original_lead.get("Phone Number"))
                     
                     if phone and str(phone).strip():
@@ -545,6 +645,9 @@ def make_vapi_calls(
     if not api_ready:
         return [], []
     
+    # Get first message from session state
+    first_message = st.session_state.get("vapi_first_message", "").strip()
+    
     # Prepare call requests with enriched data
     call_requests = []
     for lead in lead_data:
@@ -561,11 +664,17 @@ def make_vapi_calls(
                 "confidence_score": lead.get("confidence_score")
             }
             
-            call_requests.append({
+            call_request = {
                 "phone_number": phone_number,
                 "prompt": prompt,
                 "enriched_data": enriched_data
-            })
+            }
+            
+            # Add first message if provided
+            if first_message:
+                call_request["first_message"] = first_message
+            
+            call_requests.append(call_request)
     
     if not call_requests:
         return [], []
