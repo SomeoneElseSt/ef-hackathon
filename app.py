@@ -96,6 +96,20 @@ def render_upload_section() -> None:
     st.session_state["dataframe"] = dataframe
 
 
+def render_prompt_input() -> str:
+    st.divider()
+    st.subheader("Call Prompt")
+    default_value = st.session_state.get("vapi_prompt", "")
+    vapi_prompt = st.text_area(
+        label="Enter the prompt for the agents to call your list with!",
+        value=default_value,
+        placeholder="Your script goes here...",
+        help="Saved locally in session. Used later for calling.",
+        height=160,
+    )
+    st.session_state["vapi_prompt"] = vapi_prompt
+    return vapi_prompt
+
 def render_file_info_and_preview() -> None:
     dataframe: Optional[pd.DataFrame] = st.session_state.get("dataframe")
     uploaded_name: Optional[str] = st.session_state.get("uploaded_name")
@@ -105,16 +119,13 @@ def render_file_info_and_preview() -> None:
 
     top_bar = st.columns([3, 1])
     with top_bar[0]:
-        st.subheader("File loaded")
-        st.write(f"**Name**: {uploaded_name}")
-        st.write(f"**Rows**: {len(dataframe):,}")
-        st.write(f"**Columns**: {len(dataframe.columns)}")
-    with top_bar[1]:
-        if st.button("Remove file"):
-            st.session_state.pop("dataframe", None)
-            st.session_state.pop("uploaded_name", None)
-            st.cache_data.clear()
-            st.experimental_rerun()
+        st.subheader("File loaded and read")
+        st.info(
+            f"**Name:** {uploaded_name} &nbsp; | &nbsp; "
+            f"**Rows:** {len(dataframe):,} &nbsp; | &nbsp; "
+            f"**Columns:** {len(dataframe.columns)}",
+            icon="📋"
+        )
 
     st.divider()
     st.subheader("Data preview")
@@ -281,26 +292,10 @@ def render_enrichment_section() -> None:
             st.info("No successful enrichments")
 
 
-def render_prompt_input() -> str:
-    st.divider()
-    st.subheader("Call Prompt")
-    default_value = st.session_state.get("vapi_prompt", "")
-    vapi_prompt = st.text_area(
-        label="Enter the prompt for the agents to call your list with!",
-        value=default_value,
-        placeholder="Your script goes here...",
-        help="Saved locally in session. Used later for calling.",
-        height=160,
-    )
-    st.session_state["vapi_prompt"] = vapi_prompt
-    return vapi_prompt
-
-
 def main() -> None:
     render_header()
     render_upload_section()
     render_file_info_and_preview()
-    # Removed debug JSON render
     vapi_prompt = render_prompt_input()
     if vapi_prompt.strip():
         st.caption("Prompt saved.")
