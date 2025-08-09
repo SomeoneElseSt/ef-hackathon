@@ -3,8 +3,11 @@ Streamlit app for CSV/Excel upload and preview.
 Uses in-memory DataFrame handling (no file paths) and caching.
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
 import io
+import os
+import asyncio
+import importlib.util
 import pandas as pd
 import streamlit as st
 
@@ -118,9 +121,169 @@ def render_file_info_and_preview() -> None:
     st.dataframe(dataframe.head(PREVIEW_ROWS), use_container_width=True, height=240)
 
 
+def _load_csv_client_module():
+    module_key = "_csv_client_module"
+    if module_key in st.session_state:
+        return st.session_state[module_key]
+    
+    base_dir = os.path.dirname(__file__)
+    target_path = os.path.join(base_dir, "csv-client.py")
+    if not os.path.exists(target_path):
+        return None
+    
+    spec = importlib.util.spec_from_file_location("csv_client", target_path)
+    if spec is None or spec.loader is None:
+        return None
+    
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    
+    st.session_state[module_key] = module
+    return module
+
+
+def dataframe_to_dynamic_objects_safe(dataframe: pd.DataFrame) -> List[Dict[str, Any]]:
+    if dataframe is None or dataframe.empty:
+        return []
+    module = _load_csv_client_module()
+    if module is None:
+        return []
+    func = getattr(module, "dataframe_to_dynamic_objects", None)
+    if func is None:
+        return []
+    try:
+        result = func(dataframe)
+        return result if isinstance(result, list) else []
+    except Exception:
+        return []
+
+
+def _load_sixtyfour_client_module():
+    module_key = "_sixtyfour_client_module"
+    if module_key in st.session_state:
+        return st.session_state[module_key]
+    
+    base_dir = os.path.dirname(__file__)
+    target_path = os.path.join(base_dir, "sixtyfour-client.py")
+    if not os.path.exists(target_path):
+        return None
+    
+    spec = importlib.util.spec_from_file_location("sixtyfour_client", target_path)
+    if spec is None or spec.loader is None:
+        return None
+    
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    
+    st.session_state[module_key] = module
+    return module
+
+
+def get_dynamic_leads_for_api(dataframe: Optional[pd.DataFrame]) -> List[Dict[str, Any]]:
+    if dataframe is None or dataframe.empty:
+        return []
+    dynamic_objects = dataframe_to_dynamic_objects_safe(dataframe)
+    return dynamic_objects if isinstance(dynamic_objects, list) else []
+
+
+def enrich_leads_and_transform(dataframe: Optional[pd.DataFrame]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if dataframe is None or dataframe.empty:
+        return [], []
+    client_module = _load_sixtyfour_client_module()
+    if client_module is None:
+        return [], []
+
+    leads = get_dynamic_leads_for_api(dataframe)
+    if not leads:
+        return [], []
+
+    try:
+        # Use env-configured API key inside client
+        results = asyncio.run(client_module.enrich_leads_with_env(leads))
+    except Exception:
+        return [], []
+
+    # Extract successes and failures using provided helpers
+    try:
+        successful = client_module.extract_successful_phones(results)  # List[dict] with 'phone'
+    except Exception:
+        successful = []
+    try:
+        failed = client_module.extract_failed_leads(results)  # List[dict] with 'error'
+    except Exception:
+        failed = []
+
+    # Transform successful to desired shape: {"lead": {metadata...}, "phone_number": phone}
+    transformed_success: List[Dict[str, Any]] = []
+    for item in successful:
+        if not isinstance(item, dict):
+            continue
+        phone_value = item.get("phone")
+        # Prefer inner 'lead' if present to avoid double-wrapping
+        inner_lead = item.get("lead") if isinstance(item.get("lead"), dict) else {k: v for k, v in item.items() if k != "phone"}
+        transformed_success.append({
+            "lead": inner_lead,
+            "phone_number": phone_value,
+        })
+
+    return transformed_success, failed
+
+
+def render_enrichment_section() -> None:
+    dataframe: Optional[pd.DataFrame] = st.session_state.get("dataframe")
+    if dataframe is None:
+        return
+    
+    st.divider()
+    st.subheader("Find phone numbers")
+    client_module = _load_sixtyfour_client_module()
+    if client_module is None:
+        st.error("SixtyFour client not available")
+        return
+
+    api_ready = False
+    try:
+        api_ready = bool(client_module.has_api_key_configured())
+    except Exception:
+        api_ready = False
+
+    if not api_ready:
+        st.info("SIXTYFOUR_API_KEY is not configured in the environment.")
+
+    if st.button("Enrich phone numbers"):
+        if dataframe is None or dataframe.empty:
+            st.error("No data to process")
+            return
+        if not api_ready:
+            st.error("API key not configured. Set SIXTYFOUR_API_KEY in your environment.")
+            return
+        with st.spinner("Enriching phone numbers..."):
+            success_objs, failed_objs = enrich_leads_and_transform(dataframe)
+        st.session_state["enrich_success_objects"] = success_objs
+        st.session_state["enrich_failed_objects"] = failed_objs
+
+        if not success_objs and not failed_objs:
+            st.warning("No results returned")
+            return
+
+        if success_objs:
+            st.success(f"Enriched {len(success_objs)} leads")
+            # Show a sample of the successful objects
+            sample_to_show = success_objs[:min(len(success_objs), PREVIEW_ROWS)]
+            st.json(sample_to_show)
+        else:
+            st.info("No successful enrichments")
+
+
 def render_prompt_input() -> str:
     st.divider()
-    st.subheader("Call script prompt")
+    st.subheader("Call Prompt")
     default_value = st.session_state.get("vapi_prompt", "")
     vapi_prompt = st.text_area(
         label="Enter the prompt for the agents to call your list with!",
@@ -137,9 +300,11 @@ def main() -> None:
     render_header()
     render_upload_section()
     render_file_info_and_preview()
+    # Removed debug JSON render
     vapi_prompt = render_prompt_input()
     if vapi_prompt.strip():
         st.caption("Prompt saved.")
+    render_enrichment_section()
 
 
 if __name__ == "__main__":
