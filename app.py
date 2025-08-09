@@ -303,6 +303,164 @@ def render_enrichment_section() -> None:
 # Save the call outcome transcript to a list/object of all sucessful calls
 # Show on streamlit
 
+def _load_vapi_client_module():
+    """Load VAPI client module dynamically"""
+    module_key = "_vapi_client_module"
+    if module_key in st.session_state:
+        return st.session_state[module_key]
+    
+    base_dir = os.path.dirname(__file__)
+    target_path = os.path.join(base_dir, "vapi-client.py")
+    if not os.path.exists(target_path):
+        return None
+    
+    spec = importlib.util.spec_from_file_location("vapi_client", target_path)
+    if spec is None or spec.loader is None:
+        return None
+    
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    
+    st.session_state[module_key] = module
+    return module
+
+
+def make_vapi_calls(
+    success_objs: List[Dict[str, Any]], 
+    prompt: str
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Make VAPI calls to the enriched leads with phone numbers
+    
+    Args:
+        success_objs: List of successful enrichment objects with phone numbers
+        prompt: User-provided prompt for the AI agent
+        
+    Returns:
+        Tuple of (successful_calls, failed_calls)
+    """
+    if not success_objs or not prompt.strip():
+        return [], []
+    
+    client_module = _load_vapi_client_module()
+    if client_module is None:
+        return [], []
+    
+    # Check if VAPI API key is configured
+    try:
+        api_ready = bool(client_module.has_api_key_configured())
+    except Exception:
+        api_ready = False
+    
+    if not api_ready:
+        return [], []
+    
+    # Prepare call requests
+    call_requests = []
+    for obj in success_objs:
+        phone_number = obj.get("phone_number")
+        if phone_number and isinstance(phone_number, str):
+            call_requests.append({
+                "phone_number": phone_number,
+                "prompt": prompt
+            })
+    
+    if not call_requests:
+        return [], []
+    
+    try:
+        # Make the calls using the VAPI client
+        results = asyncio.run(client_module.make_outbound_calls_with_env(call_requests))
+        
+        # Extract successful and failed calls
+        successful_calls = client_module.extract_successful_calls(results)
+        failed_calls = client_module.extract_failed_calls(results)
+        
+        return successful_calls, failed_calls
+        
+    except Exception as e:
+        st.error(f"Error making VAPI calls: {str(e)}")
+        return [], []
+
+
+def render_vapi_calling_section() -> None:
+    """Render the VAPI calling section in the UI"""
+    success_objs = st.session_state.get("enrich_success_objects", [])
+    vapi_prompt = st.session_state.get("vapi_prompt", "")
+    
+    if not success_objs:
+        return
+    
+    if not vapi_prompt.strip():
+        st.info("Enter a call prompt above to enable VAPI calling")
+        return
+    
+    st.divider()
+    st.subheader("Make VAPI Calls")
+    
+    # Check VAPI client availability
+    vapi_client = _load_vapi_client_module()
+    if vapi_client is None:
+        st.error("VAPI client not available")
+        return
+    
+    # Check VAPI API key configuration
+    try:
+        vapi_api_ready = bool(vapi_client.has_api_key_configured())
+    except Exception:
+        vapi_api_ready = False
+    
+    if not vapi_api_ready:
+        st.info("VAPI_API_TOKEN is not configured in the environment.")
+        return
+    
+    if st.button("Start VAPI Calls"):
+        if not success_objs:
+            st.error("No enriched leads available for calling")
+            return
+        
+        with st.spinner("Making VAPI calls..."):
+            successful_calls, failed_calls = make_vapi_calls(success_objs, vapi_prompt)
+        
+        # Store results in session state
+        st.session_state["vapi_successful_calls"] = successful_calls
+        st.session_state["vapi_failed_calls"] = failed_calls
+        
+        # Display results
+        if successful_calls:
+            st.success(f"Successfully initiated {len(successful_calls)} calls")
+            # Show call details
+            for i, call in enumerate(successful_calls[:min(len(successful_calls), PREVIEW_ROWS)]):
+                with st.expander(f"Call {i+1}: {call.get('phone_number', 'Unknown')}"):
+                    st.json(call)
+        else:
+            st.info("No successful calls initiated")
+        
+        if failed_calls:
+            st.warning(f"Failed to initiate {len(failed_calls)} calls")
+            # Show failure details
+            for i, call in enumerate(failed_calls[:min(len(failed_calls), PREVIEW_ROWS)]):
+                with st.expander(f"Failed Call {i+1}: {call.get('phone_number', 'Unknown')}"):
+                    st.json(call)
+    
+    # Display previous call results if available
+    vapi_successful_calls = st.session_state.get("vapi_successful_calls", [])
+    vapi_failed_calls = st.session_state.get("vapi_failed_calls", [])
+    
+    if vapi_successful_calls or vapi_failed_calls:
+        st.divider()
+        st.subheader("Call Results Summary")
+        
+        if vapi_successful_calls:
+            st.success(f"Total Successful Calls: {len(vapi_successful_calls)}")
+        
+        if vapi_failed_calls:
+            st.error(f"Total Failed Calls: {len(vapi_failed_calls)}")
+
+
 def main() -> None:
     render_header()
     render_upload_section()
@@ -311,6 +469,7 @@ def main() -> None:
     if vapi_prompt.strip():
         st.caption("Prompt saved.")
     render_enrichment_section()
+    render_vapi_calling_section()
 
 
 if __name__ == "__main__":

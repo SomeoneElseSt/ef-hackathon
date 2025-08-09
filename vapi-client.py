@@ -9,6 +9,7 @@ import json
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
 from enum import Enum
+import os
 
 # Constants
 BASE_URL = "https://api.vapi.ai"
@@ -522,3 +523,50 @@ def extract_failed_calls(results: List[CallResult]) -> List[Dict[str, Any]]:
         })
     
     return failed
+
+
+def _get_api_key_from_env() -> Optional[str]:
+    """Get VAPI API token from environment variables"""
+    return os.getenv("VAPI_API_TOKEN")
+
+
+def has_api_key_configured() -> bool:
+    """Check if VAPI API token is configured in environment"""
+    return bool(_get_api_key_from_env())
+
+
+async def make_outbound_calls_with_env(
+    call_requests: List[Dict[str, str]],
+    phone_number_id: Optional[str] = None,
+    assistant_id: Optional[str] = None,
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT_CALLS
+) -> List[CallResult]:
+    """
+    Make outbound calls using environment-configured API token
+    
+    Args:
+        call_requests: List of call requests with phone_number and prompt
+        phone_number_id: VAPI phone number ID (from env if not provided)
+        assistant_id: Optional pre-configured assistant ID
+        max_concurrent: Maximum concurrent calls
+        
+    Returns:
+        List of CallResult objects
+    """
+    api_token = _get_api_key_from_env()
+    if not api_token:
+        raise ValueError("VAPI_API_TOKEN not configured in environment")
+    
+    # Get phone_number_id from environment if not provided
+    if not phone_number_id:
+        phone_number_id = os.getenv("VAPI_PHONE_NUMBER_ID")
+        if not phone_number_id:
+            raise ValueError("VAPI_PHONE_NUMBER_ID not configured in environment")
+    
+    return await make_outbound_calls(
+        api_token=api_token,
+        phone_number_id=phone_number_id,
+        call_requests=call_requests,
+        assistant_id=assistant_id,
+        max_concurrent=max_concurrent
+    )
