@@ -1,6 +1,6 @@
 # CSV File Processor
 
-A Flask-based web application for uploading and previewing CSV and Excel files with a clean, dark YC-style interface.
+A Streamlit-based app for uploading and previewing CSV and Excel files with a clean, simple interface.
 
 ## Features
 
@@ -13,27 +13,17 @@ A Flask-based web application for uploading and previewing CSV and Excel files w
 
 ## Technical Stack
 
-- **Backend**: Flask (Python)
-- **Frontend**: HTML, CSS, JavaScript
+- **App**: Streamlit (Python)
 - **Data Processing**: Pandas, NumPy
-- **File Handling**: Werkzeug
-- **Excel Support**: openpyxl
+- **Excel Support**: openpyxl/xlrd
 
 ## Project Structure
 
 ```
 EF/
-├── app.py                 # Flask application
-├── csv-client.py          # DataFrame processing utilities
+├── app.py                 # Streamlit application
+├── csv-client.py          # Optional DataFrame utilities
 ├── requirements.txt       # Python dependencies
-├── templates/
-│   └── index.html        # Main HTML template
-├── static/
-│   ├── css/
-│   │   └── style.css     # Dark YC-style CSS
-│   └── js/
-│       └── main.js       # Frontend JavaScript
-└── uploads/              # File upload directory (auto-created)
 ```
 
 ## Installation
@@ -50,14 +40,14 @@ EF/
 
 ## Usage
 
-1. Start the Flask development server:
+1. Start the Streamlit app:
    ```bash
-   python app.py
+   streamlit run app.py --server.port 8501
    ```
 
 2. Open your browser and navigate to:
    ```
-   http://localhost:5000
+   http://localhost:8501
    ```
 
 3. Upload a CSV or Excel file using the drag-and-drop interface or file picker
@@ -66,13 +56,10 @@ EF/
 
 5. Remove files when no longer needed
 
-## API Endpoints
+## Notes
 
-- `GET /` - Main application page
-- `POST /api/upload` - Upload file and get preview
-- `POST /api/remove` - Remove uploaded file
-- `GET /api/status` - Check current file status
-- `GET /api/dataframe` - Get complete DataFrame data
+- Files are not written to disk. Everything is processed in-memory.
+- Caching is enabled for parsing to speed up repeated uploads of the same file.
 
 ## Code Guidelines Followed
 
@@ -97,9 +84,7 @@ The `csv-client.py` module provides:
 - Responsive design for mobile and desktop
 - Drag-and-drop API support
 
-## Security Features
+## Security
 
-- File type validation
-- Secure filename handling
-- File size limits (16MB max)
-- Temporary file cleanup
+- File type validation (CSV/XLS/XLSX)
+- Upload size guard (16MB)
