@@ -3,10 +3,17 @@ SixtyFour AI API Client
 Handles async phone number enrichment with rate limiting and error handling.
 """
 
+import os
 import asyncio
 import aiohttp
 from typing import Dict, List, Optional, Union, Any
 from dataclasses import dataclass
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 # Constants
 BASE_URL = "https://api.sixtyfour.ai"
@@ -198,6 +205,9 @@ class SixtyFourClient:
         Returns:
             Cleaned lead dictionary
         """
+        if lead and isinstance(lead, dict) and "lead" in lead and isinstance(lead["lead"], dict):
+            lead = lead["lead"]
+        
         if not lead:
             return {}
             
@@ -286,6 +296,24 @@ async def enrich_leads(
     """
     client = SixtyFourClient(api_key, max_concurrent)
     return await client.enrich_leads_async(leads)
+
+def _get_api_key_from_env() -> Optional[str]:
+    api_key = os.getenv("SIXTYFOUR_API_KEY", "").strip()
+    if not api_key:
+        return None
+    return api_key
+
+def has_api_key_configured() -> bool:
+    return _get_api_key_from_env() is not None
+
+async def enrich_leads_with_env(
+    leads: List[Dict[str, Any]], 
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT_REQUESTS
+) -> List[PhoneResult]:
+    api_key = _get_api_key_from_env()
+    if not api_key:
+        return []
+    return await enrich_leads(api_key, leads, max_concurrent)
 
 def extract_successful_phones(results: List[PhoneResult]) -> List[Dict[str, Any]]:
     """
