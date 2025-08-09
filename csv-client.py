@@ -227,3 +227,78 @@ def load_and_preview(filepath: str, preview_rows: int = DEFAULT_PREVIEW_ROWS) ->
         return None
         
     return preview, stats
+
+# --- Dynamic row object utilities ---
+
+def is_non_empty_cell_value(value: Any) -> bool:
+    """Return True if the cell value is considered non-empty."""
+    if value is None:
+        return False
+    
+    # Handles NaN, NaT, None-like across numpy/pandas
+    if pd.isna(value):
+        return False
+    
+    if isinstance(value, str):
+        return bool(value.strip())
+    
+    # Numbers, booleans and other non-empty objects
+    return True if isinstance(value, (int, float, bool)) else bool(value)
+
+
+def normalize_value_for_json(value: Any) -> Any:
+    """Normalize pandas/numpy/scalar values for JSON serialization."""
+    if value is None or pd.isna(value):
+        return None
+    
+    try:
+        if isinstance(value, (np.integer,)):
+            return int(value)
+        if isinstance(value, (np.floating,)):
+            return float(value)
+        if isinstance(value, (np.bool_,)):
+            return bool(value)
+    except Exception:
+        pass
+    
+    # Format timestamps
+    if hasattr(value, 'isoformat'):
+        try:
+            return value.isoformat()  # pandas.Timestamp, datetime, etc.
+        except Exception:
+            return str(value)
+    
+    if isinstance(value, str):
+        return value.strip()
+    
+    return value
+
+
+def dataframe_to_dynamic_objects(dataframe: Optional[pd.DataFrame]) -> List[Dict[str, Any]]:
+    """
+    Convert a DataFrame into a list of dynamic JSON-like dicts wrapped by 'lead'.
+    - For each row, include only columns whose values are non-empty.
+    - Keys are the original column names; values are normalized for JSON.
+    - Each resulting row object is wrapped as {"lead": row_object}.
+    
+    Args:
+        dataframe: Input pandas DataFrame
+    
+    Returns:
+        List of dictionaries, one per row, each under a 'lead' key.
+    """
+    if dataframe is None or dataframe.empty:
+        return []
+    
+    row_dicts: List[Dict[str, Any]] = []
+    records = dataframe.to_dict(orient='records')
+    
+    for record in records:
+        dynamic_row: Dict[str, Any] = {}
+        for column_name, raw_value in record.items():
+            if not is_non_empty_cell_value(raw_value):
+                continue
+            dynamic_row[str(column_name)] = normalize_value_for_json(raw_value)
+        row_dicts.append({"lead": dynamic_row})
+    
+    return row_dicts
