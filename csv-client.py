@@ -299,6 +299,7 @@ def dataframe_to_dynamic_objects(dataframe: Optional[pd.DataFrame]) -> List[Dict
             if not is_non_empty_cell_value(raw_value):
                 continue
             dynamic_row[str(column_name)] = normalize_value_for_json(raw_value)
-        row_dicts.append({"lead": dynamic_row})
+        if dynamic_row:
+            row_dicts.append({"lead": dynamic_row})
     
     return row_dicts
