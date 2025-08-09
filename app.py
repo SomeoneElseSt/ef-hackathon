@@ -205,58 +205,92 @@ def get_dynamic_leads_for_api(dataframe: Optional[pd.DataFrame]) -> List[Dict[st
 
 def enrich_leads_and_transform(dataframe: Optional[pd.DataFrame]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     if dataframe is None or dataframe.empty:
+        print("DEBUG: DataFrame is None or empty")
         return [], []
     client_module = _load_sixtyfour_client_module()
     if client_module is None:
+        print("DEBUG: SixtyFour client module not loaded")
         return [], []
 
     leads = get_dynamic_leads_for_api(dataframe)
+    print(f"DEBUG: Generated {len(leads)} leads for API:")
+    for i, lead in enumerate(leads[:3]):  # Print first 3 leads
+        print(f"DEBUG: Lead {i+1}: {lead}")
+    
     if not leads:
+        print("DEBUG: No leads generated from dataframe")
         return [], []
 
     try:
         # Use env-configured API key inside client
-        results = asyncio.run(client_module.enrich_leads_with_env(leads))
-    except Exception:
+        print("DEBUG: Calling SixtyFour API...")
+        results = client_module.enrich_leads_with_env(leads)
+        print(f"DEBUG: Received {len(results)} results from SixtyFour API")
+    except Exception as e:
+        print(f"DEBUG: Exception calling SixtyFour API: {e}")
         return [], []
 
-    # Extract successes and failures using provided helpers
-    try:
-        successful = client_module.extract_successful_phones(results)  # List[dict] with 'phone'
-    except Exception:
-        successful = []
-    try:
-        failed = client_module.extract_failed_leads(results)  # List[dict] with 'error'
-    except Exception:
-        failed = []
-
-    # Transform successful to desired shape: {"lead": {metadata...}, "phone_number": phone}
-    transformed_success: List[Dict[str, Any]] = []
-    for item in successful:
-        if not isinstance(item, dict):
+    # Process raw enrichment results directly
+    successful = []
+    failed = []
+    
+    print("DEBUG: Processing enrichment results...")
+    for i, result in enumerate(results):
+        print(f"DEBUG: Result {i+1} type: {type(result)}")
+        print(f"DEBUG: Result {i+1} has success attr: {hasattr(result, 'success')}")
+        
+        if not hasattr(result, 'success'):
+            print(f"DEBUG: Result {i+1} skipped - no success attribute")
             continue
-        phone_value = item.get("phone")
-        # Prefer inner 'lead' if present to avoid double-wrapping
-        inner_lead = item.get("lead") if isinstance(item.get("lead"), dict) else {k: v for k, v in item.items() if k != "phone"}
-        transformed_success.append({
-            "lead": inner_lead,
-            "phone_number": phone_value,
-        })
+            
+        print(f"DEBUG: Result {i+1} success: {result.success}")
+        
+        if result.success:
+            print(f"DEBUG: Result {i+1} structured_data: {result.structured_data}")
+            print(f"DEBUG: Result {i+1} original_lead: {result.original_lead}")
+            
+            # Create enriched lead object with all data
+            enriched_lead = {
+                "lead": result.original_lead or {},
+                "structured_data": result.structured_data or {},
+                "notes": result.notes,
+                "findings": result.findings or [],
+                "references": result.references or {},
+                "confidence_score": result.confidence_score,
+                "raw_response": result.raw_response
+            }
+            successful.append(enriched_lead)
+            print(f"DEBUG: Added successful lead {i+1}")
+        else:
+            print(f"DEBUG: Result {i+1} failed with error: {result.error}")
+            # Create failed lead object
+            failed_lead = {
+                "lead": result.original_lead or {},
+                "error": result.error
+            }
+            failed.append(failed_lead)
 
-    return transformed_success, failed
+    print(f"DEBUG: Final results - Successful: {len(successful)}, Failed: {len(failed)}")
+    return successful, failed
 
 
-def render_enrichment_section() -> None:
+def render_enrichment_section() -> Tuple[List[str], List[Dict[str, Any]]]:
     dataframe: Optional[pd.DataFrame] = st.session_state.get("dataframe")
     if dataframe is None:
-        return
+        return [], []
     
     st.divider()
-    st.subheader("Find phone numbers")
+    st.subheader("Enrich lead data")
     client_module = _load_sixtyfour_client_module()
+    csv_module = _load_csv_client_module()
+    
     if client_module is None:
         st.error("SixtyFour client not available")
-        return
+        return [], []
+    
+    if csv_module is None:
+        st.error("CSV client not available")
+        return [], []
 
     api_ready = False
     try:
@@ -267,41 +301,124 @@ def render_enrichment_section() -> None:
     if not api_ready:
         st.info("SIXTYFOUR_API_KEY is not configured in the environment.")
 
-    if st.button("Enrich phone numbers"):
+    # Check if we have existing enriched data
+    existing_phone_numbers = st.session_state.get("phone_numbers", [])
+    existing_lead_data = st.session_state.get("complete_lead_data", [])
+    
+    if existing_phone_numbers and existing_lead_data:
+        st.info(f"Using {len(existing_phone_numbers)} previously enriched leads")
+        return existing_phone_numbers, existing_lead_data
+
+    if st.button("Enrich lead data"):
         if dataframe is None or dataframe.empty:
             st.error("No data to process")
-            return
+            return [], []
         if not api_ready:
             st.error("API key not configured. Set SIXTYFOUR_API_KEY in your environment.")
-            return
-        with st.spinner("Enriching phone numbers..."):
+            return [], []
+        
+        with st.spinner("Enriching lead data..."):
             success_objs, failed_objs = enrich_leads_and_transform(dataframe)
+        
         st.session_state["enrich_success_objects"] = success_objs
         st.session_state["enrich_failed_objects"] = failed_objs
 
         if not success_objs and not failed_objs:
             st.warning("No results returned")
-            return
+            return [], []
 
         if success_objs:
             st.success(f"Enriched {len(success_objs)} leads")
-            # Show a sample of the successful objects
-            sample_to_show = success_objs[:min(len(success_objs), PREVIEW_ROWS)]
-            st.json(sample_to_show)
+            
+            # Use CSV client to prepare data for calling
+            try:
+                phone_numbers, complete_lead_data = csv_module.prepare_lead_data_for_calling(success_objs)
+                
+                # Save to session state
+                st.session_state["phone_numbers"] = phone_numbers
+                st.session_state["complete_lead_data"] = complete_lead_data
+                
+                # Show preview
+                st.write(f"**Found {len(phone_numbers)} leads with phone numbers:**")
+                sample_to_show = complete_lead_data[:min(len(complete_lead_data), PREVIEW_ROWS)]
+                st.json(sample_to_show)
+                
+                return phone_numbers, complete_lead_data
+                
+            except Exception as e:
+                st.error(f"Error preparing lead data: {str(e)}")
+                return [], []
         else:
             st.info("No successful enrichments")
+            return [], []
+    
+    return [], []
 
-### VAPI Pseudo code
-# Inputs: 
-# succesful leads gotten from extract succesful phones function
-# prompt, provided by the user on the streamlit dashboard 
-# 
-# Processing:
-# Call VAPI API with the prompt and the to phone number
-# 
-# Output: 
-# Save the call outcome transcript to a list/object of all sucessful calls
-# Show on streamlit
+
+def call_vapi_api(prompt: str, phone_numbers: List[str], lead_data: List[Dict[str, Any]]) -> None:
+    """
+    Call VAPI API with the provided prompt, phone numbers, and complete lead data.
+    
+    Args:
+        prompt: The script/prompt for the agents to use during calls
+        phone_numbers: List of phone numbers to call
+        lead_data: Complete lead data including enriched information
+    """
+    if not prompt.strip():
+        return
+    
+    if not phone_numbers:
+        st.warning("No phone numbers available for calling")
+        return
+    
+    if not lead_data:
+        st.warning("No lead data available for calling")
+        return
+    
+    st.divider()
+    st.subheader("VAPI Call Results")
+    st.info(f"Ready to call {len(phone_numbers)} leads with enriched data and provided prompt")
+    
+    # Show prompt
+    st.write("**Call Script:**")
+    st.text_area("Prompt", value=prompt, disabled=True, height=100)
+    
+    # Show lead data preview
+    st.write("**Leads to Call:**")
+    for i, lead in enumerate(lead_data, 1):
+        with st.expander(f"Lead {i}: {lead.get('phone_number', 'No phone')}"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Original Data:**")
+                original = lead.get("original_lead", {})
+                if original:
+                    st.json(original)
+                else:
+                    st.write("No original data")
+            
+            with col2:
+                st.write("**Enriched Data:**")
+                enriched = lead.get("enriched_data", {})
+                if enriched:
+                    st.json(enriched)
+                else:
+                    st.write("No enriched data")
+            
+            # Show additional enrichment info
+            if lead.get("notes"):
+                st.write("**Notes:**")
+                st.write(lead["notes"])
+            
+            if lead.get("findings"):
+                st.write("**Key Findings:**")
+                for finding in lead["findings"]:
+                    st.write(f"• {finding}")
+    
+    # Placeholder for actual VAPI implementation
+    st.info("🚀 Ready to start calling! (VAPI integration pending)")
+    # TODO: Implement actual VAPI API calls with complete lead data
+
 
 def main() -> None:
     render_header()
@@ -310,7 +427,9 @@ def main() -> None:
     vapi_prompt = render_prompt_input()
     if vapi_prompt.strip():
         st.caption("Prompt saved.")
-    render_enrichment_section()
+    phone_numbers, lead_data = render_enrichment_section()
+    call_vapi_api(vapi_prompt, phone_numbers, lead_data)
+
 
 
 if __name__ == "__main__":
