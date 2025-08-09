@@ -133,7 +133,10 @@ class SixtyFourClient:
             "linkedin": "LinkedIn URL for the person",
             "website": "Company website URL",
             "location": "The individual's location and/or company location",
-            "industry": "Industry the person operates in"
+            "industry": "Industry the person operates in",
+            "years_of_experience": "Number of years of professional experience",
+            "seniority_level": "Seniority level (e.g., Junior, Mid-level, Senior, Executive, C-Suite)",
+            "main_roles": "Primary job roles and responsibilities"
         }
     
     def _make_sync_api_request(

@@ -146,6 +146,7 @@ class VAPIClient:
         phone_number = call_request.get("phone_number", "")
         base_prompt = call_request.get("prompt", "")
         enriched_data = call_request.get("enriched_data")
+        first_message = call_request.get("first_message")
         
         # Normalize the phone number to E.164 format with +1
         normalized_phone = self._normalize_phone_number(phone_number)
@@ -172,7 +173,12 @@ class VAPIClient:
         # Build enriched prompt with lead context
         enriched_prompt = self._build_enriched_prompt(base_prompt, enriched_data)
         
-        payload = self._build_call_payload(phone_number, enriched_prompt, call_request)
+        # Create enhanced call request with first message
+        enhanced_request = dict(call_request)
+        if first_message:
+            enhanced_request["first_message"] = first_message
+        
+        payload = self._build_call_payload(phone_number, enriched_prompt, enhanced_request)
         
         for attempt in range(MAX_RETRIES):
             result = await self._make_api_call(session, payload, phone_number)
