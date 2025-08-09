@@ -9,6 +9,11 @@ import json
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
 from enum import Enum
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Constants
 BASE_URL = "https://api.vapi.ai"
@@ -58,13 +63,13 @@ class VAPIClient:
     
     async def make_outbound_calls(
         self, 
-        call_requests: List[Dict[str, str]]
+        call_requests: List[Dict[str, Any]]
     ) -> List[CallResult]:
         """
         Makes multiple outbound calls asynchronously
         
         Args:
-            call_requests: List of dicts with 'phone_number' and 'prompt' keys
+            call_requests: List of dicts with 'phone_number', 'prompt', and optional 'enriched_data' keys
             
         Returns:
             List of CallResult objects
@@ -139,7 +144,11 @@ class VAPIClient:
             CallResult object
         """
         phone_number = call_request.get("phone_number", "")
-        prompt = call_request.get("prompt", "")
+        base_prompt = call_request.get("prompt", "")
+        enriched_data = call_request.get("enriched_data")
+        
+        # Normalize the phone number to E.164 format with +1
+        normalized_phone = self._normalize_phone_number(phone_number)
         
         if not self._is_valid_phone_number(phone_number):
             return CallResult(
@@ -149,7 +158,10 @@ class VAPIClient:
                 error="Invalid phone number format"
             )
         
-        if not prompt:
+        # Use the normalized phone number for the API call
+        phone_number = normalized_phone
+        
+        if not base_prompt:
             return CallResult(
                 success=False,
                 phone_number=phone_number,
@@ -157,7 +169,10 @@ class VAPIClient:
                 error="Prompt is required"
             )
         
-        payload = self._build_call_payload(phone_number, prompt, call_request)
+        # Build enriched prompt with lead context
+        enriched_prompt = self._build_enriched_prompt(base_prompt, enriched_data)
+        
+        payload = self._build_call_payload(phone_number, enriched_prompt, call_request)
         
         for attempt in range(MAX_RETRIES):
             result = await self._make_api_call(session, payload, phone_number)
@@ -364,6 +379,65 @@ class VAPIClient:
         
         return assistant
     
+    def _build_enriched_prompt(self, base_prompt: str, enriched_data: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Builds an enriched prompt that includes SixtyFour API data
+        
+        Args:
+            base_prompt: The base user-provided prompt
+            enriched_data: Optional enriched data from SixtyFour API
+            
+        Returns:
+            Enhanced prompt with lead context
+        """
+        if not enriched_data:
+            return base_prompt
+        
+        # Extract key information from enriched data
+        lead_context = []
+        
+        # Add original lead data if available
+        original_lead = enriched_data.get("original_lead", {})
+        if original_lead:
+            lead_context.append("LEAD INFORMATION:")
+            for key, value in original_lead.items():
+                if value and str(value).strip():
+                    lead_context.append(f"- {key.title()}: {value}")
+        
+        # Add structured data from SixtyFour API
+        structured_data = enriched_data.get("structured_data", {})
+        if structured_data:
+            lead_context.append("\nENRICHED DATA:")
+            for key, value in structured_data.items():
+                if value and str(value).strip():
+                    lead_context.append(f"- {key.title()}: {value}")
+        
+        # Add key findings if available
+        findings = enriched_data.get("findings", [])
+        if findings:
+            lead_context.append("\nKEY INSIGHTS:")
+            for finding in findings:
+                if finding and str(finding).strip():
+                    lead_context.append(f"- {finding}")
+        
+        # Add notes if available
+        notes = enriched_data.get("notes", "")
+        if notes and notes.strip():
+            lead_context.append(f"\nADDITIONAL NOTES:\n{notes}")
+        
+        # Combine base prompt with enriched context
+        if lead_context:
+            context_section = "\n".join(lead_context)
+            enriched_prompt = f"""{base_prompt}
+
+LEAD CONTEXT FOR THIS CALL:
+{context_section}
+
+Use this information to personalize your conversation and provide relevant value to the lead."""
+            return enriched_prompt
+        
+        return base_prompt
+    
     def _get_request_headers(self) -> Dict[str, str]:
         """Returns request headers with authentication"""
         return {
@@ -371,9 +445,45 @@ class VAPIClient:
             "Content-Type": "application/json"
         }
     
+    def _normalize_phone_number(self, phone_number: str) -> str:
+        """
+        Normalizes phone number to E.164 format with +1 prefix for US numbers
+        
+        Args:
+            phone_number: Raw phone number string
+            
+        Returns:
+            Normalized phone number with +1 prefix
+        """
+        if not phone_number:
+            return ""
+        
+        # Remove all non-digit characters
+        digits_only = ''.join(filter(str.isdigit, phone_number))
+        
+        if not digits_only:
+            return ""
+        
+        # Handle different US phone number formats
+        if len(digits_only) == 10:
+            # 10 digits - assume US number, add +1
+            return f"+1{digits_only}"
+        elif len(digits_only) == 11 and digits_only.startswith('1'):
+            # 11 digits starting with 1 - US number with country code
+            return f"+{digits_only}"
+        elif len(digits_only) == 11 and not digits_only.startswith('1'):
+            # 11 digits not starting with 1 - assume US number, add +1
+            return f"+1{digits_only}"
+        elif len(digits_only) > 11:
+            # More than 11 digits - assume already has country code, add +
+            return f"+{digits_only}"
+        else:
+            # Less than 10 digits - invalid
+            return ""
+    
     def _is_valid_phone_number(self, phone_number: str) -> bool:
         """
-        Validates phone number format
+        Validates phone number format after normalization
         
         Args:
             phone_number: Phone number string
@@ -384,18 +494,20 @@ class VAPIClient:
         if not phone_number:
             return False
         
-        # Remove spaces and special characters for validation
-        cleaned = phone_number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        normalized = self._normalize_phone_number(phone_number)
         
-        # Must start with + and have 10-15 digits
-        if not cleaned.startswith("+"):
+        if not normalized:
             return False
         
-        digits = cleaned[1:]
+        # Must start with + and have 11-15 digits total (including country code)
+        if not normalized.startswith("+"):
+            return False
+        
+        digits = normalized[1:]
         if not digits.isdigit():
             return False
         
-        return 10 <= len(digits) <= 15
+        return 11 <= len(digits) <= 15
     
     def _process_call_results(
         self, 
@@ -421,7 +533,7 @@ class VAPIClient:
 async def make_outbound_calls(
     api_token: str,
     phone_number_id: str,
-    call_requests: List[Dict[str, str]],
+    call_requests: List[Dict[str, Any]],
     assistant_id: Optional[str] = None,
     max_concurrent: int = DEFAULT_MAX_CONCURRENT_CALLS
 ) -> List[CallResult]:
@@ -431,7 +543,7 @@ async def make_outbound_calls(
     Args:
         api_token: VAPI API token
         phone_number_id: VAPI phone number ID
-        call_requests: List of call requests with phone_number and prompt
+        call_requests: List of call requests with phone_number, prompt, and optional enriched_data
         assistant_id: Optional pre-configured assistant ID
         max_concurrent: Maximum concurrent calls
         
@@ -522,3 +634,87 @@ def extract_failed_calls(results: List[CallResult]) -> List[Dict[str, Any]]:
         })
     
     return failed
+
+
+def normalize_phone_number(phone_number: str) -> str:
+    """
+    Normalizes phone number to E.164 format with +1 prefix for US numbers
+    
+    Args:
+        phone_number: Raw phone number string
+        
+    Returns:
+        Normalized phone number with +1 prefix
+    """
+    if not phone_number:
+        return ""
+    
+    # Remove all non-digit characters
+    digits_only = ''.join(filter(str.isdigit, phone_number))
+    
+    if not digits_only:
+        return ""
+    
+    # Handle different US phone number formats
+    if len(digits_only) == 10:
+        # 10 digits - assume US number, add +1
+        return f"+1{digits_only}"
+    elif len(digits_only) == 11 and digits_only.startswith('1'):
+        # 11 digits starting with 1 - US number with country code
+        return f"+{digits_only}"
+    elif len(digits_only) == 11 and not digits_only.startswith('1'):
+        # 11 digits not starting with 1 - assume US number, add +1
+        return f"+1{digits_only}"
+    elif len(digits_only) > 11:
+        # More than 11 digits - assume already has country code, add +
+        return f"+{digits_only}"
+    else:
+        # Less than 10 digits - invalid
+        return ""
+
+
+def _get_api_key_from_env() -> Optional[str]:
+    """Get VAPI API token from environment variables"""
+    return os.getenv("VAPI_API_TOKEN")
+
+
+def has_api_key_configured() -> bool:
+    """Check if VAPI API token is configured in environment"""
+    return bool(_get_api_key_from_env())
+
+
+async def make_outbound_calls_with_env(
+    call_requests: List[Dict[str, Any]],
+    phone_number_id: Optional[str] = None,
+    assistant_id: Optional[str] = None,
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT_CALLS
+) -> List[CallResult]:
+    """
+    Make outbound calls using environment-configured API token
+    
+    Args:
+        call_requests: List of call requests with phone_number, prompt, and optional enriched_data
+        phone_number_id: VAPI phone number ID (from env if not provided)
+        assistant_id: Optional pre-configured assistant ID
+        max_concurrent: Maximum concurrent calls
+        
+    Returns:
+        List of CallResult objects
+    """
+    api_token = _get_api_key_from_env()
+    if not api_token:
+        raise ValueError("VAPI_API_TOKEN not configured in environment")
+    
+    # Get phone_number_id from environment if not provided
+    if not phone_number_id:
+        phone_number_id = os.getenv("VAPI_PHONE_NUMBER_ID")
+        if not phone_number_id:
+            raise ValueError("VAPI_PHONE_NUMBER_ID not configured in environment")
+    
+    return await make_outbound_calls(
+        api_token=api_token,
+        phone_number_id=phone_number_id,
+        call_requests=call_requests,
+        assistant_id=assistant_id,
+        max_concurrent=max_concurrent
+    )

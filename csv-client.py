@@ -8,6 +8,43 @@ import numpy as np
 from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 
+
+def normalize_phone_number(phone_number: str) -> str:
+    """
+    Normalizes phone number to E.164 format with +1 prefix for US numbers
+    
+    Args:
+        phone_number: Raw phone number string
+        
+    Returns:
+        Normalized phone number with +1 prefix
+    """
+    if not phone_number:
+        return ""
+    
+    # Remove all non-digit characters
+    digits_only = ''.join(filter(str.isdigit, phone_number))
+    
+    if not digits_only:
+        return ""
+    
+    # Handle different US phone number formats
+    if len(digits_only) == 10:
+        # 10 digits - assume US number, add +1
+        return f"+1{digits_only}"
+    elif len(digits_only) == 11 and digits_only.startswith('1'):
+        # 11 digits starting with 1 - US number with country code
+        return f"+{digits_only}"
+    elif len(digits_only) == 11 and not digits_only.startswith('1'):
+        # 11 digits not starting with 1 - assume US number, add +1
+        return f"+1{digits_only}"
+    elif len(digits_only) > 11:
+        # More than 11 digits - assume already has country code, add +
+        return f"+{digits_only}"
+    else:
+        # Less than 10 digits - invalid
+        return ""
+
 # Constants
 DEFAULT_PREVIEW_ROWS = 5
 MAX_DISPLAY_COLUMNS = 20
@@ -303,3 +340,127 @@ def dataframe_to_dynamic_objects(dataframe: Optional[pd.DataFrame]) -> List[Dict
             row_dicts.append({"lead": dynamic_row})
     
     return row_dicts
+
+
+def extract_phone_numbers_from_leads(lead_data: List[Dict[str, Any]]) -> List[str]:
+    """
+    Extract and normalize phone numbers from enriched lead data.
+    
+    Args:
+        lead_data: List of enriched lead dictionaries
+    
+    Returns:
+        List of normalized phone numbers as strings (E.164 format with +1)
+    """
+    phone_numbers = []
+    
+    for lead_item in lead_data:
+        if not isinstance(lead_item, dict):
+            continue
+            
+        raw_phone = None
+        
+        # Check for phone in structured_data (from enrichment)
+        structured_data = lead_item.get("structured_data", {})
+        if isinstance(structured_data, dict):
+            phone = structured_data.get("phone")
+            if phone and str(phone).strip():
+                raw_phone = str(phone).strip()
+        
+        # Check for phone in lead data (from CSV) if not found in structured_data
+        if not raw_phone:
+            lead = lead_item.get("lead", {})
+            if isinstance(lead, dict):
+                phone = lead.get("phone") or lead.get("Phone") or lead.get("phone_number") or lead.get("Phone Number")
+                if phone and str(phone).strip():
+                    raw_phone = str(phone).strip()
+        
+        # Check top-level phone field (backward compatibility) if still not found
+        if not raw_phone:
+            phone = lead_item.get("phone") or lead_item.get("Phone") or lead_item.get("phone_number")
+            if phone and str(phone).strip():
+                raw_phone = str(phone).strip()
+        
+        # Normalize the phone number if we found one
+        if raw_phone:
+            normalized_phone = normalize_phone_number(raw_phone)
+            if normalized_phone:  # Only add if normalization was successful
+                phone_numbers.append(normalized_phone)
+    
+    return phone_numbers
+
+
+def prepare_lead_data_for_calling(enriched_results: List[Dict[str, Any]]) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """
+    Prepare lead data for VAPI calling by extracting phone numbers and organizing complete lead data.
+    
+    Args:
+        enriched_results: List of enriched lead results from SixtyFour API
+    
+    Returns:
+        Tuple of (phone_numbers, complete_lead_data)
+    """
+    print(f"DEBUG CSV: Preparing {len(enriched_results)} enriched results for calling")
+    phone_numbers = []
+    complete_lead_data = []
+    
+    for i, result in enumerate(enriched_results):
+        print(f"DEBUG CSV: Processing result {i+1}: {type(result)}")
+        print(f"DEBUG CSV: Result {i+1} keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
+        
+        if not isinstance(result, dict):
+            print(f"DEBUG CSV: Result {i+1} skipped - not a dict")
+            continue
+        
+        # Extract phone number
+        phone = None
+        
+        # Priority 1: From structured_data (enriched)
+        structured_data = result.get("structured_data", {})
+        print(f"DEBUG CSV: Result {i+1} structured_data: {structured_data}")
+        if isinstance(structured_data, dict):
+            phone = structured_data.get("phone")
+            if phone:
+                print(f"DEBUG CSV: Result {i+1} found phone in structured_data: {phone}")
+        
+        # Priority 2: From original lead data (CSV)
+        if not phone:
+            lead = result.get("lead", {})
+            print(f"DEBUG CSV: Result {i+1} lead data: {lead}")
+            if isinstance(lead, dict):
+                phone = (lead.get("phone") or lead.get("Phone") or 
+                        lead.get("phone_number") or lead.get("Phone Number"))
+                if phone:
+                    print(f"DEBUG CSV: Result {i+1} found phone in lead data: {phone}")
+        
+        # Priority 3: Top-level phone field
+        if not phone:
+            phone = (result.get("phone") or result.get("Phone") or 
+                    result.get("phone_number"))
+            if phone:
+                print(f"DEBUG CSV: Result {i+1} found phone at top level: {phone}")
+        
+        print(f"DEBUG CSV: Result {i+1} final phone: {phone}")
+        
+        # Only include leads with valid phone numbers
+        if phone and str(phone).strip():
+            phone_str = str(phone).strip()
+            phone_numbers.append(phone_str)
+            
+            # Create complete lead data object
+            lead_data_item = {
+                "phone_number": phone_str,
+                "original_lead": result.get("lead", {}),
+                "enriched_data": structured_data,
+                "notes": result.get("notes"),
+                "findings": result.get("findings", []),
+                "references": result.get("references", {}),
+                "confidence_score": result.get("confidence_score")
+            }
+            complete_lead_data.append(lead_data_item)
+            print(f"DEBUG CSV: Added lead {i+1} with phone {phone_str}")
+        else:
+            print(f"DEBUG CSV: Result {i+1} skipped - no valid phone number")
+    
+    print(f"DEBUG CSV: Final results - {len(phone_numbers)} phone numbers, {len(complete_lead_data)} complete leads")
+    return phone_numbers, complete_lead_data
