@@ -74,8 +74,8 @@ def load_dataframe_from_upload(uploaded_file) -> Tuple[bool, Optional[pd.DataFra
 
 
 def render_header() -> None:
-    st.set_page_config(page_title="Hire Line", page_icon="📁", layout="centered")
-    st.title("Hire Line")
+    st.set_page_config(page_title="Hire Line 👨‍💻👩‍💻", page_icon="📁", layout="centered")
+    st.title("Hire Line 👨‍💻👩‍💻")
     st.caption("Upload your hiring prospects list .csv data with a phone number and we'll call them to screen them with ascript you provide.")
 
 
@@ -141,7 +141,15 @@ def render_prompt_input() -> str:
                     with st.spinner("Generating prompt with ChatGPT..."):
                         try:
                             result = chatgpt_module.generate_prompt_with_env(dataframe)
-                            
+                            # Save candidate fitness list if present (simple text)
+                            try:
+                                fitness_text = getattr(result, "candidate_fitness_list", None)
+                                st.session_state["candidate_fitness_list"] = (fitness_text or "").strip()
+                                st.session_state["fitness_tokens_used"] = getattr(result, "fitness_tokens_used", None)
+                            except Exception:
+                                st.session_state["candidate_fitness_list"] = ""
+                                st.session_state["fitness_tokens_used"] = None
+
                             if result.success and result.generated_prompt:
                                 st.session_state["vapi_prompt"] = result.generated_prompt
                                 st.session_state["prompt_generated"] = True
@@ -174,6 +182,44 @@ def render_prompt_input() -> str:
     )
     st.session_state["vapi_prompt"] = vapi_prompt
     
+    # Candidate fitness list (cards by default for readability)
+    fitness_text = (st.session_state.get("candidate_fitness_list") or "").strip()
+    if fitness_text:
+        st.markdown("**Candidate fitness (inferred role fit):**")
+        lines = [ln for ln in fitness_text.splitlines() if ln.strip()]
+        # Always render as Cards by default
+        items = []
+        for line in lines:
+            txt = line.strip()
+            if txt.startswith("- "):
+                txt = txt[2:]
+            parts = [p.strip() for p in txt.split('—')]
+            if len(parts) >= 3:
+                items.append({"name": parts[0], "fit": parts[1], "note": '—'.join(parts[2:]).strip()})
+            else:
+                items.append({"name": txt, "fit": "", "note": ""})
+
+        if items:
+            for item in items:
+                emoji = ""
+                fval = item.get("fit", "").lower()
+                if "high" in fval:
+                    emoji = "🟢"
+                elif "medium" in fval:
+                    emoji = "🟡"
+                elif "low" in fval:
+                    emoji = "🔴"
+                name = item.get("name", "")
+                note = item.get("note", "")
+                cols = st.columns([3, 1, 6])
+                with cols[0]:
+                    st.markdown(f"**{name}**")
+                with cols[1]:
+                    st.markdown(f"**{emoji} {item.get('fit','')}**" if item.get('fit') else "")
+                with cols[2]:
+                    if isinstance(note, str) and note.strip():
+                        st.markdown(note)
+    
     # First message input
     st.write("**First Message (Optional)**")
     default_first_message = st.session_state.get("vapi_first_message", "")
@@ -187,6 +233,8 @@ def render_prompt_input() -> str:
     st.session_state["vapi_first_message"] = vapi_first_message
     
     return vapi_prompt
+
+    # Note: Additional sections are rendered below after returning the prompt
 
 def render_file_info_and_preview() -> None:
     dataframe: Optional[pd.DataFrame] = st.session_state.get("dataframe")

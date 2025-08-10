@@ -7,7 +7,7 @@ import os
 import json
 import requests
 import pandas as pd
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 
 try:
@@ -31,6 +31,9 @@ class PromptGenerationResult:
     error: Optional[str] = None
     tokens_used: Optional[int] = None
     model_used: Optional[str] = None
+    # Additional outputs
+    candidate_fitness_list: Optional[str] = None
+    fitness_tokens_used: Optional[int] = None
 
 class ChatGPTClient:
     """Client for OpenAI ChatGPT API to generate recruitment call prompts"""
@@ -50,7 +53,8 @@ class ChatGPTClient:
     
     def generate_recruitment_prompt(self, dataframe: pd.DataFrame) -> PromptGenerationResult:
         """
-        Generate a recruitment call prompt based on CSV dataframe analysis
+        Generate a recruitment call prompt based on CSV dataframe analysis,
+        and also produce a bullet-list fitness summary for each candidate.
         
         Args:
             dataframe: Pandas DataFrame containing lead data
@@ -73,8 +77,25 @@ class ChatGPTClient:
         # Create user prompt with dataframe analysis
         user_prompt = self._create_user_prompt(dataframe_analysis)
         
-        # Make API request
-        return self._make_chat_completion_request(system_prompt, user_prompt)
+        # 1) Generate the recruitment call prompt
+        prompt_result = self._make_chat_completion_request(system_prompt, user_prompt)
+
+        # 2) Generate candidate fitness list in batches (best-effort; do not fail overall)
+        fitness_list_text, fitness_tokens_used = self._generate_candidate_fitness_list_best_effort(
+            dataframe=dataframe,
+            analysis=dataframe_analysis,
+        )
+
+        # Combine into a single result, preserving original success flag
+        return PromptGenerationResult(
+            success=prompt_result.success,
+            generated_prompt=prompt_result.generated_prompt,
+            error=prompt_result.error,
+            tokens_used=prompt_result.tokens_used,
+            model_used=self.model,
+            candidate_fitness_list=fitness_list_text if fitness_list_text else None,
+            fitness_tokens_used=fitness_tokens_used if fitness_tokens_used > 0 else None,
+        )
     
     def _analyze_dataframe(self, df: pd.DataFrame) -> Dict[str, Any]:
         """
@@ -189,6 +210,99 @@ Return only the generated prompt, formatted as a clear script for AI agents to f
         
         return prompt
     
+    def _get_fitness_system_prompt(self) -> str:
+        """
+        System prompt for generating candidate fitness bullets.
+        """
+        return (
+            "You are an experienced recruiter. Given a dataset of candidates, "
+            "infer the most common target role the dataset is geared toward. "
+            "Then, for each provided candidate row, assess their fitness for that inferred role. "
+            "Return ONLY a plain bullet list (one line per candidate). Each bullet must follow the format: \n"
+            "- <best identifier> — <High|Medium|Low> fit — <very short reason>\n"
+            "Do not include headings, numbering, or extra commentary. Keep each bullet under 25 words."
+        )
+
+    def _create_fitness_user_prompt(self, analysis: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
+        """
+        Build a concise user prompt for candidate fitness summarization.
+        """
+        # Keep analysis short to save tokens
+        analysis_overview = {
+            "total_rows": analysis.get("total_rows"),
+            "columns": analysis.get("columns", []),
+            "unique_values": analysis.get("unique_values", {}),
+            "sample_data": analysis.get("sample_data", []),
+        }
+        return (
+            "Dataset analysis (for inferring the typical role):\n" +
+            json.dumps(analysis_overview, indent=2, default=str) +
+            "\n\nCandidates to rate (JSON array of rows):\n" +
+            json.dumps(rows, indent=2, default=str) +
+            "\n\nInstructions: Infer the dataset's common target role and rate each candidate accordingly. "
+            "Output only the bullet list."
+        )
+
+    def _iter_row_batches(self, df: pd.DataFrame, batch_size: int = 25) -> List[List[Dict[str, Any]]]:
+        """
+        Yield the dataframe rows as batches of JSON-serializable dicts.
+        Truncate long string values to keep prompt compact.
+        """
+        num_rows = len(df)
+        if num_rows <= 0:
+            return []
+
+        def truncate_value(value: Any, max_len: int = 160) -> Any:
+            if isinstance(value, str) and len(value) > max_len:
+                return value[:max_len] + "…"
+            return value
+
+        records: List[Dict[str, Any]] = []
+        for _, row in df.iterrows():
+            row_dict: Dict[str, Any] = {}
+            for col in df.columns:
+                val = row[col]
+                if pd.isna(val):
+                    continue
+                row_dict[str(col)] = truncate_value(val)
+            records.append(row_dict)
+
+        batches: List[List[Dict[str, Any]]] = []
+        for i in range(0, len(records), batch_size):
+            batches.append(records[i:i+batch_size])
+        return batches
+
+    def _generate_candidate_fitness_list_best_effort(
+        self,
+        dataframe: pd.DataFrame,
+        analysis: Dict[str, Any],
+    ) -> Tuple[str, int]:
+        """
+        Best-effort generation of a candidate fitness bullet list across all rows.
+        Returns (text, tokens_used). Never raises.
+        """
+        try:
+            batches = self._iter_row_batches(dataframe, batch_size=25)
+            if not batches:
+                return "", 0
+
+            system_prompt = self._get_fitness_system_prompt()
+            total_tokens = 0
+            bullet_sections: List[str] = []
+
+            for batch in batches:
+                user_prompt = self._create_fitness_user_prompt(analysis, batch)
+                batch_result = self._make_chat_completion_request(system_prompt, user_prompt)
+                if batch_result.success and batch_result.generated_prompt:
+                    bullet_sections.append(batch_result.generated_prompt.strip())
+                    if batch_result.tokens_used:
+                        total_tokens += int(batch_result.tokens_used)
+
+            combined = "\n".join([s for s in bullet_sections if s]).strip()
+            return combined, total_tokens
+        except Exception:
+            return "", 0
+
     def _make_chat_completion_request(
         self, 
         system_prompt: str, 
